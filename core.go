@@ -48,25 +48,8 @@ func (fl *FaultLine) Possible() bool {
 	return !fl.disabled && fl.rand.Float64() <= fl.possibleProbability
 }
 
-// Delay will always add a small sleep time at the invocation site. The exactly
-// sleep time, is determined by the configuration of the FaultLine.
-func (fl *FaultLine) Delay(ctx context.Context) bool {
-	if fl.disabled {
-		return false
-	}
-	delayFactor := fl.rand.Float64()
-	if fl.delayMod != nil {
-		delayFactor = fl.delayMod(delayFactor)
-	}
-	delayFactor = math.Min(math.Max(0, delayFactor), 1)
-	duration := time.Duration(delayFactor * float64(fl.delayMax))
+func (fl *FaultLine) doDelay(duration time.Duration, ctx context.Context) bool {
 	if duration > 0 {
-		if fl.auditFunction != nil {
-			var buff []byte
-			runtime.Stack(buff, false)
-			fl.auditFunction(fl, fmt.Sprintf("injecting delay of %s", duration), string(buff))
-		}
-
 		t := time.NewTimer(duration)
 		select {
 		case <-t.C:
@@ -79,6 +62,18 @@ func (fl *FaultLine) Delay(ctx context.Context) bool {
 	return false
 }
 
+func (fl *FaultLine) prepareDelay() time.Duration {
+	if fl.disabled {
+		return 0
+	}
+	delayFactor := fl.rand.Float64()
+	if fl.delayMod != nil {
+		delayFactor = fl.delayMod(delayFactor)
+	}
+	delayFactor = math.Min(math.Max(0, delayFactor), 1)
+	return time.Duration(delayFactor * float64(fl.delayMax))
+}
+
 // PossibleDelay will maybe add a small sleep time at the invocation site. Whether to sleep or not, and the exactly
 // sleep time, are determined by the configuration of the FaultLine.
 func (fl *FaultLine) PossibleDelay(ctx context.Context) bool {
@@ -86,7 +81,13 @@ func (fl *FaultLine) PossibleDelay(ctx context.Context) bool {
 		return false
 	}
 	if fl.Possible() {
-		fl.Delay(ctx)
+		d := fl.prepareDelay()
+		if fl.auditFunction != nil {
+			var buff []byte
+			runtime.Stack(buff, false)
+			fl.auditFunction(fl, fmt.Sprintf("injecting delay of %s", d), string(buff))
+		}
+		fl.doDelay(d, ctx)
 		return true
 	}
 	return false
@@ -122,8 +123,8 @@ func (fl *FaultLine) DoInTheFuture(before time.Duration, f func(), ctx context.C
 	}
 	subFl := fl.With(MaximumDelay(before))
 	go func() {
-		if subFl.Delay(ctx) {
-			panic(fmt.Errorf("injected a random panic"))
+		if subFl.doDelay(subFl.prepareDelay(), ctx) {
+			f()
 		}
 	}()
 	return true
